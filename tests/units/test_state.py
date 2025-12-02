@@ -55,7 +55,7 @@ from reflex.utils.exceptions import (
 )
 from reflex.utils.format import json_dumps
 from reflex.utils.token_manager import SocketRecord
-from reflex.vars.base import Var, computed_var
+from reflex.vars.base import Field, Var, computed_var, field
 from tests.units.mock_redis import mock_redis
 
 from .states import GenState
@@ -306,12 +306,12 @@ def test_base_class_vars(test_state):
     fields = test_state.get_fields()
     cls = type(test_state)
 
-    for field in fields:
-        if field.startswith("_") or field in cls.get_skip_vars():
+    for field_name in fields:
+        if field_name.startswith("_") or field_name in cls.get_skip_vars():
             continue
-        prop = getattr(cls, field)
+        prop = getattr(cls, field_name)
         assert isinstance(prop, Var)
-        assert prop._js_expr.split(".")[-1] == field + FIELD_MARKER
+        assert prop._js_expr.split(".")[-1] == field_name + FIELD_MARKER
 
     assert cls.num1._var_type is int
     assert cls.num2._var_type is float
@@ -2054,6 +2054,38 @@ class ModelDC:
 
     foo: str = "bar"
     ls: list[dict] = dataclasses.field(default_factory=list)
+
+    def set_foo(self, val: str):
+        """Set the attribute foo.
+
+        Args:
+            val: The value to set.
+        """
+        self.foo = val
+
+    def double_foo(self) -> str:
+        """Concatenate foo with foo.
+
+        Returns:
+            foo + foo
+        """
+        return self.foo + self.foo
+
+    def copy(self, **kwargs) -> ModelDC:
+        """Create a copy of the dataclass with updated fields.
+
+        Returns:
+            A new instance of ModelDC with updated fields.
+        """
+        return dataclasses.replace(self, **kwargs)
+
+    def append_to_ls(self, item: dict):
+        """Append an item to the list attribute ls.
+
+        Args:
+            item: The item to append.
+        """
+        self.ls.append(item)
 
 
 @pytest.mark.asyncio
@@ -3806,11 +3838,43 @@ class ModelV1(BaseModelV1):
 
     foo: str = "bar"
 
+    def set_foo(self, val: str):
+        """Set the attribute foo.
+
+        Args:
+            val: The value to set.
+        """
+        self.foo = val
+
+    def double_foo(self) -> str:
+        """Concatenate foo with foo.
+
+        Returns:
+            foo + foo
+        """
+        return self.foo + self.foo
+
 
 class ModelV2(BaseModelV2):
     """A pydantic BaseModel v2."""
 
     foo: str = "bar"
+
+    def set_foo(self, val: str):
+        """Set the attribute foo.
+
+        Args:
+            val: The value to set.
+        """
+        self.foo = val
+
+    def double_foo(self) -> str:
+        """Concatenate foo with foo.
+
+        Returns:
+            foo + foo
+        """
+        return self.foo + self.foo
 
 
 class PydanticState(rx.State):
@@ -3828,28 +3892,57 @@ def test_mutable_models():
     state.v1.foo = "baz"
     assert state.dirty_vars == {"v1"}
     state.dirty_vars.clear()
+    state.v1.set_foo("quuc")
+    assert state.dirty_vars == {"v1"}
+    state.dirty_vars.clear()
+    assert state.v1.double_foo() == "quucquuc"
+    assert state.dirty_vars == set()
+    state.v1.copy(update={"foo": "larp"})
+    assert state.dirty_vars == set()
 
     assert isinstance(state.v2, MutableProxy)
     state.v2.foo = "baz"
     assert state.dirty_vars == {"v2"}
     state.dirty_vars.clear()
+    state.v2.set_foo("quuc")
+    assert state.dirty_vars == {"v2"}
+    state.dirty_vars.clear()
+    assert state.v2.double_foo() == "quucquuc"
+    assert state.dirty_vars == set()
+    state.v2.model_copy(update={"foo": "larp"})
+    assert state.dirty_vars == set()
 
     assert isinstance(state.dc, MutableProxy)
     state.dc.foo = "baz"
     assert state.dirty_vars == {"dc"}
     state.dirty_vars.clear()
     assert state.dirty_vars == set()
+    state.dc.set_foo("quuc")
+    assert state.dirty_vars == {"dc"}
+    state.dirty_vars.clear()
+    assert state.dirty_vars == set()
+    assert state.dc.double_foo() == "quucquuc"
+    assert state.dirty_vars == set()
     state.dc.ls.append({"hi": "reflex"})
     assert state.dirty_vars == {"dc"}
     state.dirty_vars.clear()
     assert state.dirty_vars == set()
-    assert dataclasses.asdict(state.dc) == {"foo": "baz", "ls": [{"hi": "reflex"}]}
-    assert dataclasses.astuple(state.dc) == ("baz", [{"hi": "reflex"}])
+    assert dataclasses.asdict(state.dc) == {"foo": "quuc", "ls": [{"hi": "reflex"}]}
+    assert dataclasses.astuple(state.dc) == ("quuc", [{"hi": "reflex"}])
     # creating a new instance shouldn't mark the state dirty
-    assert dataclasses.replace(state.dc, foo="quuc") == ModelDC(
-        foo="quuc", ls=[{"hi": "reflex"}]
+    assert dataclasses.replace(state.dc, foo="larp") == ModelDC(
+        foo="larp", ls=[{"hi": "reflex"}]
     )
     assert state.dirty_vars == set()
+    dc_copy = state.dc.copy()
+    assert dc_copy == state.dc
+    assert dc_copy is not state.dc
+    dc_copy.foo = "new_foo"
+    assert state.dirty_vars == set()
+    dc_copy.append_to_ls({"new": "item"})
+    assert state.dirty_vars == set()
+    state.dc.append_to_ls({"new": "item"})
+    assert state.dirty_vars == {"dc"}
 
 
 def test_dict_and_get_delta():
@@ -4211,6 +4304,8 @@ async def test_async_computed_var_get_var_value(mock_app: rx.App, token: str):
     state = await mock_app.state_manager.get_state(_substate_key(token, OtherState))
     other_state = await state.get_state(OtherState)
     assert comp.State is not None
+    # The state should have been pre-cached from the dependency.
+    assert comp.State.get_name() in state.substates
     comp_state = await state.get_state(comp.State)
     assert comp_state.dirty_vars == set()
 
@@ -4236,3 +4331,35 @@ def test_computed_var_mutability() -> None:
 
     assert first_cv is not second_cv
     assert first_cv._static_deps is not second_cv._static_deps
+
+
+@pytest.mark.asyncio
+async def test_add_dependency_get_state_regression(mock_app: rx.App, token: str):
+    """Ensure that a state class can be fetched separately when it's is explicit dep."""
+
+    class DataState(rx.State):
+        """A state with a var."""
+
+        data: Field[list[int]] = field(default_factory=lambda: [1, 2, 3])
+
+    class StatsState(rx.State):
+        """A state with a computed var depending on DataState."""
+
+        @rx.var(cache=True)
+        async def total(self) -> int:
+            data_state = await self.get_state(DataState)
+            return sum(data_state.data)
+
+    StatsState.computed_vars["total"].add_dependency(StatsState, DataState.data)
+
+    class OtherState(rx.State):
+        """A state that gets DataState."""
+
+        @rx.event
+        async def fetch_data_state(self) -> None:
+            print(await self.get_state(DataState))
+
+    mock_app.state_manager.state = mock_app._state = rx.State
+    state = await mock_app.state_manager.get_state(_substate_key(token, OtherState))
+    other_state = await state.get_state(OtherState)
+    await other_state.fetch_data_state()  # Should not raise exception.
